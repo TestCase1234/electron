@@ -20,6 +20,8 @@ const supportedWebViewEvents = Object.keys(webViewEvents);
 
 const guestInstances = new Map<number, GuestInstance>();
 const embedderElementsMap = new Map<string, number>();
+const attachParams = new WeakMap<Electron.WebContents, Record<string, any>>();
+const viewInstanceId = new WeakMap<Electron.WebContents, number>();
 
 function sanitizeOptionsForGuest (options: Record<string, any>) {
   const ret = { ...options };
@@ -34,12 +36,12 @@ const createGuest = function (embedder: Electron.WebContents, params: Record<str
   const guest = (webContents as typeof ElectronInternal.WebContents).create({
     type: 'webview',
     partition: params.partition,
-    embedder: embedder
+    embedder
   });
   const guestInstanceId = guest.id;
   guestInstances.set(guestInstanceId, {
-    guest: guest,
-    embedder: embedder
+    guest,
+    embedder
   });
 
   // Clear the guest from map when it is destroyed.
@@ -51,11 +53,11 @@ const createGuest = function (embedder: Electron.WebContents, params: Record<str
 
   // Init guest web view after attached.
   guest.once('did-attach' as any, function (this: Electron.WebContents, event: Electron.Event) {
-    params = this.attachParams!;
-    delete this.attachParams;
+    params = attachParams.get(this)!;
+    attachParams.delete(this);
 
-    const previouslyAttached = this.viewInstanceId != null;
-    this.viewInstanceId = params.instanceId;
+    const previouslyAttached = viewInstanceId.has(this);
+    viewInstanceId.set(this, params.instanceId);
 
     // Only load URL and set size on first attach
     if (previouslyAttached) {
@@ -77,7 +79,7 @@ const createGuest = function (embedder: Electron.WebContents, params: Record<str
 
   const sendToEmbedder = (channel: string, ...args: any[]) => {
     if (!embedder.isDestroyed()) {
-      embedder._sendInternal(`${channel}-${guest.viewInstanceId}`, ...args);
+      embedder._sendInternal(`${channel}-${viewInstanceId.get(guest)}`, ...args);
     }
   };
 
@@ -151,9 +153,9 @@ const attachGuest = function (event: Electron.IpcMainInvokeEvent,
     embedderElementsMap.delete(oldKey);
 
     // Remove guest from embedder if moving across web views
-    if (guest.viewInstanceId !== params.instanceId) {
+    if (viewInstanceId.get(guest) !== params.instanceId) {
       webViewManager.removeGuest(guestInstance.embedder, guestInstanceId);
-      guestInstance.embedder._sendInternal(`${IPC_MESSAGES.GUEST_VIEW_INTERNAL_DESTROY_GUEST}-${guest.viewInstanceId}`);
+      guestInstance.embedder._sendInternal(`${IPC_MESSAGES.GUEST_VIEW_INTERNAL_DESTROY_GUEST}-${viewInstanceId.get(guest)}`);
     }
   }
 
@@ -165,7 +167,7 @@ const attachGuest = function (event: Electron.IpcMainInvokeEvent,
       : null;
 
   const webPreferences: Electron.WebPreferences = {
-    guestInstanceId: guestInstanceId,
+    guestInstanceId,
     nodeIntegration: params.nodeintegration != null ? params.nodeintegration : false,
     nodeIntegrationInSubFrames: params.nodeintegrationinsubframes != null ? params.nodeintegrationinsubframes : false,
     plugins: params.plugins,
@@ -202,12 +204,12 @@ const attachGuest = function (event: Electron.IpcMainInvokeEvent,
 
   embedder.emit('will-attach-webview', event, webPreferences, params);
   if (event.defaultPrevented) {
-    if (guest.viewInstanceId == null) guest.viewInstanceId = params.instanceId;
+    if (!viewInstanceId.has(guest)) viewInstanceId.set(guest, params.instanceId);
     guest.destroy();
     return;
   }
 
-  guest.attachParams = params;
+  attachParams.set(guest, params);
   embedderElementsMap.set(key, guestInstanceId);
 
   guest.setEmbedder(embedder);
